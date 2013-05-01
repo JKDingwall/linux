@@ -61,6 +61,7 @@
 #include <linux/kthread.h>
 #include <linux/freezer.h>
 #include <linux/parser.h>
+#include <linux/cleancache.h>
 
 static const struct super_operations xfs_super_operations;
 static kmem_zone_t *xfs_ioend_zone;
@@ -1499,6 +1500,8 @@ xfs_fs_fill_super(
 		error = ENOMEM;
 		goto out_unmount;
 	}
+
+	cleancache_init_fs(sb);
 
 	return 0;
 
