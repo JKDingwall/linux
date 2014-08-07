@@ -32,6 +32,7 @@
 #include <linux/syscalls.h>
 
 #include <asm/atomic.h>
+#include <asm/debug-monitors.h>
 #include <asm/traps.h>
 #include <asm/stacktrace.h>
 #include <asm/exception.h>
@@ -250,10 +251,13 @@ void die(const char *str, struct pt_regs *regs, int err)
 void arm64_notify_die(const char *str, struct pt_regs *regs,
 		      struct siginfo *info, int err)
 {
-	if (user_mode(regs))
+	if (user_mode(regs)) {
+		current->thread.fault_address = 0;
+		current->thread.fault_code = err;
 		force_sig_info(info->si_signo, info, current);
-	else
+	} else {
 		die(str, regs, err);
+	}
 }
 
 asmlinkage void __exception do_undefinstr(struct pt_regs *regs)
@@ -261,11 +265,9 @@ asmlinkage void __exception do_undefinstr(struct pt_regs *regs)
 	siginfo_t info;
 	void __user *pc = (void __user *)instruction_pointer(regs);
 
-#ifdef CONFIG_COMPAT
 	/* check for AArch32 breakpoint instructions */
-	if (compat_user_mode(regs) && aarch32_break_trap(regs) == 0)
+	if (!aarch32_break_handler(regs))
 		return;
-#endif
 
 	if (show_unhandled_signals && unhandled_signal(current, SIGILL) &&
 	    printk_ratelimit()) {

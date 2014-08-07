@@ -147,6 +147,9 @@ int __request_module(bool wait, const char *fmt, ...)
 	 */
 	WARN_ON_ONCE(wait && current_is_async());
 
+	if (!modprobe_path[0])
+		return 0;
+
 	va_start(args, fmt);
 	ret = vsnprintf(module_name, MODULE_NAME_LEN, fmt, args);
 	va_end(args);
@@ -236,7 +239,7 @@ static int ____call_usermodehelper(void *data)
 
 	commit_creds(new);
 
-	retval = do_execve(sub_info->path,
+	retval = do_execve(getname_kernel(sub_info->path),
 			   (const char __user *const __user *)sub_info->argv,
 			   (const char __user *const __user *)sub_info->envp);
 	if (!retval)
@@ -282,10 +285,7 @@ static int wait_for_helper(void *data)
 	pid_t pid;
 
 	/* If SIGCLD is ignored sys_wait4 won't populate the status. */
-	spin_lock_irq(&current->sighand->siglock);
-	current->sighand->action[SIGCHLD-1].sa.sa_handler = SIG_DFL;
-	spin_unlock_irq(&current->sighand->siglock);
-
+	kernel_sigaction(SIGCHLD, SIG_DFL);
 	pid = kernel_thread(____call_usermodehelper, sub_info, SIGCHLD);
 	if (pid < 0) {
 		sub_info->retval = pid;
@@ -495,7 +495,7 @@ int __usermodehelper_disable(enum umh_disable_depth depth)
 static void helper_lock(void)
 {
 	atomic_inc(&running_helpers);
-	smp_mb__after_atomic_inc();
+	smp_mb__after_atomic();
 }
 
 static void helper_unlock(void)
@@ -568,15 +568,11 @@ int call_usermodehelper_exec(struct subprocess_info *sub_info, int wait)
 	DECLARE_COMPLETION_ONSTACK(done);
 	int retval = 0;
 
-	helper_lock();
 	if (!sub_info->path) {
-		retval = -EINVAL;
-		goto out;
+		call_usermodehelper_freeinfo(sub_info);
+		return -EINVAL;
 	}
-
-	if (sub_info->path[0] == '\0')
-		goto out;
-
+	helper_lock();
 	if (!khelper_wq || usermodehelper_disabled) {
 		retval = -EBUSY;
 		goto out;

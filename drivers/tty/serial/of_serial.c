@@ -9,7 +9,6 @@
  *  2 of the License, or (at your option) any later version.
  *
  */
-#include <linux/init.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/delay.h>
@@ -174,6 +173,7 @@ static int of_platform_serial_probe(struct platform_device *ofdev)
 	{
 		struct uart_8250_port port8250;
 		memset(&port8250, 0, sizeof(port8250));
+		port.type = port_type;
 		port8250.port = port;
 
 		if (port.fifosize)
@@ -182,6 +182,10 @@ static int of_platform_serial_probe(struct platform_device *ofdev)
 		if (of_property_read_bool(ofdev->dev.of_node,
 					  "auto-flow-control"))
 			port8250.capabilities |= UART_CAP_AFE;
+
+		if (of_property_read_bool(ofdev->dev.of_node,
+					  "has-hw-flow-control"))
+			port8250.port.flags |= UPF_HARD_FLOW;
 
 		ret = serial8250_register_8250_port(&port8250);
 		break;
@@ -204,7 +208,7 @@ static int of_platform_serial_probe(struct platform_device *ofdev)
 
 	info->type = port_type;
 	info->line = ret;
-	dev_set_drvdata(&ofdev->dev, info);
+	platform_set_drvdata(ofdev, info);
 	return 0;
 out:
 	kfree(info);
@@ -217,7 +221,7 @@ out:
  */
 static int of_platform_serial_remove(struct platform_device *ofdev)
 {
-	struct of_serial_info *info = dev_get_drvdata(&ofdev->dev);
+	struct of_serial_info *info = platform_get_drvdata(ofdev);
 	switch (info->type) {
 #ifdef CONFIG_SERIAL_8250
 	case PORT_8250 ... PORT_MAX_8250:

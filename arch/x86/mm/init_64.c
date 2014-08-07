@@ -368,7 +368,7 @@ void __init init_extra_mapping_uc(unsigned long phys, unsigned long size)
  *
  *   from __START_KERNEL_map to __START_KERNEL_map + size (== _end-_text)
  *
- * phys_addr holds the negative offset to the kernel, which is added
+ * phys_base holds the negative offset to the kernel, which is added
  * to the compile time generated pmds. This results in invalid pmds up
  * to the point where we hit the physaddr 0 mapping.
  *
@@ -643,7 +643,7 @@ kernel_physical_mapping_init(unsigned long start,
 #ifndef CONFIG_NUMA
 void __init initmem_init(void)
 {
-	memblock_set_node(0, (phys_addr_t)ULLONG_MAX, 0);
+	memblock_set_node(0, (phys_addr_t)ULLONG_MAX, &memblock.memory, 0);
 }
 #endif
 
@@ -712,36 +712,22 @@ EXPORT_SYMBOL_GPL(arch_add_memory);
 
 static void __meminit free_pagetable(struct page *page, int order)
 {
-	struct zone *zone;
-	bool bootmem = false;
 	unsigned long magic;
 	unsigned int nr_pages = 1 << order;
 
 	/* bootmem page has reserved flag */
 	if (PageReserved(page)) {
 		__ClearPageReserved(page);
-		bootmem = true;
 
 		magic = (unsigned long)page->lru.next;
 		if (magic == SECTION_INFO || magic == MIX_SECTION_INFO) {
 			while (nr_pages--)
 				put_page_bootmem(page++);
 		} else
-			__free_pages_bootmem(page, order);
+			while (nr_pages--)
+				free_reserved_page(page++);
 	} else
 		free_pages((unsigned long)page_address(page), order);
-
-	/*
-	 * SECTION_INFO pages and MIX_SECTION_INFO pages
-	 * are all allocated by bootmem.
-	 */
-	if (bootmem) {
-		zone = page_zone(page);
-		zone_span_writelock(zone);
-		zone->present_pages += nr_pages;
-		zone_span_writeunlock(zone);
-		totalram_pages += nr_pages;
-	}
 }
 
 static void __meminit free_pte_table(pte_t *pte_start, pmd_t *pmd)
@@ -1058,9 +1044,6 @@ static void __init register_page_bootmem_info(void)
 
 void __init mem_init(void)
 {
-	long codesize, reservedpages, datasize, initsize;
-	unsigned long absent_pages;
-
 	pci_iommu_alloc();
 
 	/* clear_bss() already clear the empty_zero_page */
@@ -1068,29 +1051,14 @@ void __init mem_init(void)
 	register_page_bootmem_info();
 
 	/* this will put all memory onto the freelists */
-	totalram_pages = free_all_bootmem();
-
-	absent_pages = absent_pages_in_range(0, max_pfn);
-	reservedpages = max_pfn - totalram_pages - absent_pages;
+	free_all_bootmem();
 	after_bootmem = 1;
 
-	codesize =  (unsigned long) &_etext - (unsigned long) &_text;
-	datasize =  (unsigned long) &_edata - (unsigned long) &_etext;
-	initsize =  (unsigned long) &__init_end - (unsigned long) &__init_begin;
-
 	/* Register memory areas for /proc/kcore */
-	kclist_add(&kcore_vsyscall, (void *)VSYSCALL_START,
-			 VSYSCALL_END - VSYSCALL_START, KCORE_OTHER);
+	kclist_add(&kcore_vsyscall, (void *)VSYSCALL_ADDR,
+			 PAGE_SIZE, KCORE_OTHER);
 
-	printk(KERN_INFO "Memory: %luk/%luk available (%ldk kernel code, "
-			 "%ldk absent, %ldk reserved, %ldk data, %ldk init)\n",
-		nr_free_pages() << (PAGE_SHIFT-10),
-		max_pfn << (PAGE_SHIFT-10),
-		codesize >> 10,
-		absent_pages << (PAGE_SHIFT-10),
-		reservedpages << (PAGE_SHIFT-10),
-		datasize >> 10,
-		initsize >> 10);
+	mem_init_print_info(NULL);
 }
 
 #ifdef CONFIG_DEBUG_RODATA
@@ -1166,11 +1134,10 @@ void mark_rodata_ro(void)
 	set_memory_ro(start, (end-start) >> PAGE_SHIFT);
 #endif
 
-	free_init_pages("unused kernel memory",
+	free_init_pages("unused kernel",
 			(unsigned long) __va(__pa_symbol(text_end)),
 			(unsigned long) __va(__pa_symbol(rodata_start)));
-
-	free_init_pages("unused kernel memory",
+	free_init_pages("unused kernel",
 			(unsigned long) __va(__pa_symbol(rodata_end)),
 			(unsigned long) __va(__pa_symbol(_sdata)));
 }
@@ -1218,11 +1185,19 @@ int kern_addr_valid(unsigned long addr)
  * covers the 64bit vsyscall page now. 32bit has a real VMA now and does
  * not need special handling anymore:
  */
+static const char *gate_vma_name(struct vm_area_struct *vma)
+{
+	return "[vsyscall]";
+}
+static struct vm_operations_struct gate_vma_ops = {
+	.name = gate_vma_name,
+};
 static struct vm_area_struct gate_vma = {
-	.vm_start	= VSYSCALL_START,
-	.vm_end		= VSYSCALL_START + (VSYSCALL_MAPPED_PAGES * PAGE_SIZE),
+	.vm_start	= VSYSCALL_ADDR,
+	.vm_end		= VSYSCALL_ADDR + PAGE_SIZE,
 	.vm_page_prot	= PAGE_READONLY_EXEC,
-	.vm_flags	= VM_READ | VM_EXEC
+	.vm_flags	= VM_READ | VM_EXEC,
+	.vm_ops		= &gate_vma_ops,
 };
 
 struct vm_area_struct *get_gate_vma(struct mm_struct *mm)
@@ -1251,28 +1226,45 @@ int in_gate_area(struct mm_struct *mm, unsigned long addr)
  */
 int in_gate_area_no_mm(unsigned long addr)
 {
-	return (addr >= VSYSCALL_START) && (addr < VSYSCALL_END);
+	return (addr & PAGE_MASK) == VSYSCALL_ADDR;
 }
 
-const char *arch_vma_name(struct vm_area_struct *vma)
+static unsigned long probe_memory_block_size(void)
 {
-	if (vma->vm_mm && vma->vm_start == (long)vma->vm_mm->context.vdso)
-		return "[vdso]";
-	if (vma == &gate_vma)
-		return "[vsyscall]";
-	return NULL;
-}
+	/* start from 2g */
+	unsigned long bz = 1UL<<31;
 
 #ifdef CONFIG_X86_UV
-unsigned long memory_block_size_bytes(void)
-{
 	if (is_uv_system()) {
 		printk(KERN_INFO "UV: memory block size 2GB\n");
 		return 2UL * 1024 * 1024 * 1024;
 	}
-	return MIN_MEMORY_BLOCK_SIZE;
-}
 #endif
+
+	/* less than 64g installed */
+	if ((max_pfn << PAGE_SHIFT) < (16UL << 32))
+		return MIN_MEMORY_BLOCK_SIZE;
+
+	/* get the tail size */
+	while (bz > MIN_MEMORY_BLOCK_SIZE) {
+		if (!((max_pfn << PAGE_SHIFT) & (bz - 1)))
+			break;
+		bz >>= 1;
+	}
+
+	printk(KERN_DEBUG "memory block size : %ldMB\n", bz >> 20);
+
+	return bz;
+}
+
+static unsigned long memory_block_size_probed;
+unsigned long memory_block_size_bytes(void)
+{
+	if (!memory_block_size_probed)
+		memory_block_size_probed = probe_memory_block_size();
+
+	return memory_block_size_probed;
+}
 
 #ifdef CONFIG_SPARSEMEM_VMEMMAP
 /*

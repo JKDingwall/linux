@@ -60,8 +60,6 @@
 #define TYPE_DATE_NULL      0x4800
 
 #define TYPE_CTL_PSPOLL     0xa400
-#define TYPE_CTL_RTS        0xb400
-#define TYPE_CTL_CTS        0xc400
 #define TYPE_CTL_ACK        0xd400
 
 #else //if LITTLE_ENDIAN
@@ -91,23 +89,11 @@
 #define TYPE_DATE_NULL      0x0048
 
 #define TYPE_CTL_PSPOLL     0x00a4
-#define TYPE_CTL_RTS        0x00b4
-#define TYPE_CTL_CTS        0x00c4
 #define TYPE_CTL_ACK        0x00d4
 
 #endif //#ifdef __BIG_ENDIAN
 
 #define WEP_IV_MASK         0x00FFFFFF
-
-//
-// 802_3 packet
-//
-typedef struct tagS802_3Header {
-    u8    abyDstAddr[ETH_ALEN];
-    u8    abySrcAddr[ETH_ALEN];
-    u16    wLen;
-} __attribute__ ((__packed__))
-S802_3Header, *PS802_3Header;
 
 //u8 ETHbyGetHashIndexByCrc(u8 * pbyMultiAddr);
 bool ETHbIsBufferCrc32Ok(u8 * pbyBuffer, unsigned int cbFrameLength);

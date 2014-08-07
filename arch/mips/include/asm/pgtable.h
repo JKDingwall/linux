@@ -32,6 +32,8 @@ struct vm_area_struct;
 				 _page_cachable_default)
 #define PAGE_KERNEL	__pgprot(_PAGE_PRESENT | __READABLE | __WRITEABLE | \
 				 _PAGE_GLOBAL | _page_cachable_default)
+#define PAGE_KERNEL_NC	__pgprot(_PAGE_PRESENT | __READABLE | __WRITEABLE | \
+				 _PAGE_GLOBAL | _CACHE_CACHABLE_NONCOHERENT)
 #define PAGE_USERIO	__pgprot(_PAGE_PRESENT | (cpu_has_rixi ? 0 : _PAGE_READ) | _PAGE_WRITE | \
 				 _page_cachable_default)
 #define PAGE_KERNEL_UNCACHED __pgprot(_PAGE_PRESENT | __READABLE | \
@@ -394,9 +396,7 @@ static inline int io_remap_pfn_range(struct vm_area_struct *vma,
 	phys_t phys_addr_high = fixup_bigphys_addr(pfn << PAGE_SHIFT, size);
 	return remap_pfn_range(vma, vaddr, phys_addr_high >> PAGE_SHIFT, size, prot);
 }
-#else
-#define io_remap_pfn_range(vma, vaddr, pfn, size, prot)		\
-		remap_pfn_range(vma, vaddr, pfn, size, prot)
+#define io_remap_pfn_range io_remap_pfn_range
 #endif
 
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE

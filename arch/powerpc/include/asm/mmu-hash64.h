@@ -22,6 +22,7 @@
  */
 #include <asm/pgtable-ppc64.h>
 #include <asm/bug.h>
+#include <asm/processor.h>
 
 /*
  * Segment table
@@ -135,8 +136,8 @@ extern char initial_stab[];
 #ifndef __ASSEMBLY__
 
 struct hash_pte {
-	unsigned long v;
-	unsigned long r;
+	__be64 v;
+	__be64 r;
 };
 
 extern struct hash_pte *htab_address;
@@ -340,6 +341,20 @@ extern int hash_page(unsigned long ea, unsigned long access, unsigned long trap)
 int __hash_page_huge(unsigned long ea, unsigned long access, unsigned long vsid,
 		     pte_t *ptep, unsigned long trap, int local, int ssize,
 		     unsigned int shift, unsigned int mmu_psize);
+#ifdef CONFIG_TRANSPARENT_HUGEPAGE
+extern int __hash_page_thp(unsigned long ea, unsigned long access,
+			   unsigned long vsid, pmd_t *pmdp, unsigned long trap,
+			   int local, int ssize, unsigned int psize);
+#else
+static inline int __hash_page_thp(unsigned long ea, unsigned long access,
+				  unsigned long vsid, pmd_t *pmdp,
+				  unsigned long trap, int local,
+				  int ssize, unsigned int psize)
+{
+	BUG();
+	return -1;
+}
+#endif
 extern void hash_failure_debug(unsigned long ea, unsigned long access,
 			       unsigned long vsid, unsigned long trap,
 			       int ssize, int psize, int lpsize,
@@ -482,7 +497,7 @@ extern void slb_set_size(u16 size);
  */
 struct subpage_prot_table {
 	unsigned long maxaddr;	/* only addresses < this are protected */
-	unsigned int **protptrs[2];
+	unsigned int **protptrs[(TASK_SIZE_USER64 >> 43)];
 	unsigned int *low_prot[4];
 };
 

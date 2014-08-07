@@ -25,7 +25,7 @@ struct drr_class {
 
 	struct gnet_stats_basic_packed		bstats;
 	struct gnet_stats_queue		qstats;
-	struct gnet_stats_rate_est	rate_est;
+	struct gnet_stats_rate_est64	rate_est;
 	struct list_head		alist;
 	struct Qdisc			*qdisc;
 
@@ -391,8 +391,10 @@ static struct sk_buff *drr_dequeue(struct Qdisc *sch)
 	while (1) {
 		cl = list_first_entry(&q->active, struct drr_class, alist);
 		skb = cl->qdisc->ops->peek(cl->qdisc);
-		if (skb == NULL)
+		if (skb == NULL) {
+			qdisc_warn_nonwc(__func__, cl->qdisc);
 			goto out;
+		}
 
 		len = qdisc_pkt_len(skb);
 		if (len <= cl->deficit) {

@@ -23,7 +23,6 @@
 #include <linux/aio.h>
 #include "ext4_jbd2.h"
 #include "truncate.h"
-#include "ext4_extents.h"	/* Needed for EXT_MAX_BLOCKS */
 
 #include <trace/events/ext4.h>
 
@@ -390,7 +389,13 @@ static int ext4_alloc_branch(handle_t *handle, struct inode *inode,
 	return 0;
 failed:
 	for (; i >= 0; i--) {
-		if (i != indirect_blks && branch[i].bh)
+		/*
+		 * We want to ext4_forget() only freshly allocated indirect
+		 * blocks.  Buffer for new_blocks[i-1] is at branch[i].bh and
+		 * buffer at branch[0].bh is indirect block / inode already
+		 * existing before ext4_alloc_branch() was called.
+		 */
+		if (i > 0 && i != indirect_blks && branch[i].bh)
 			ext4_forget(handle, 1, inode, branch[i].bh,
 				    branch[i].bh->b_blocknr);
 		ext4_free_blocks(handle, inode, NULL, new_blocks[i],
@@ -624,7 +629,7 @@ cleanup:
 		partial--;
 	}
 out:
-	trace_ext4_ind_map_blocks_exit(inode, map, err);
+	trace_ext4_ind_map_blocks_exit(inode, flags, map, err);
 	return err;
 }
 
@@ -640,8 +645,7 @@ out:
  * VFS code falls back into buffered path in that case so we are safe.
  */
 ssize_t ext4_ind_direct_IO(int rw, struct kiocb *iocb,
-			   const struct iovec *iov, loff_t offset,
-			   unsigned long nr_segs)
+			   struct iov_iter *iter, loff_t offset)
 {
 	struct file *file = iocb->ki_filp;
 	struct inode *inode = file->f_mapping->host;
@@ -649,7 +653,7 @@ ssize_t ext4_ind_direct_IO(int rw, struct kiocb *iocb,
 	handle_t *handle;
 	ssize_t ret;
 	int orphan = 0;
-	size_t count = iov_length(iov, nr_segs);
+	size_t count = iov_iter_count(iter);
 	int retries = 0;
 
 	if (rw == WRITE) {
@@ -675,11 +679,6 @@ ssize_t ext4_ind_direct_IO(int rw, struct kiocb *iocb,
 
 retry:
 	if (rw == READ && ext4_should_dioread_nolock(inode)) {
-		if (unlikely(atomic_read(&EXT4_I(inode)->i_unwritten))) {
-			mutex_lock(&inode->i_mutex);
-			ext4_flush_unwritten_io(inode);
-			mutex_unlock(&inode->i_mutex);
-		}
 		/*
 		 * Nolock dioread optimization may be dynamically disabled
 		 * via ext4_inode_block_unlocked_dio(). Check inode's state
@@ -693,18 +692,17 @@ retry:
 			goto locked;
 		}
 		ret = __blockdev_direct_IO(rw, iocb, inode,
-				 inode->i_sb->s_bdev, iov,
-				 offset, nr_segs,
+				 inode->i_sb->s_bdev, iter, offset,
 				 ext4_get_block, NULL, NULL, 0);
 		inode_dio_done(inode);
 	} else {
 locked:
-		ret = blockdev_direct_IO(rw, iocb, inode, iov,
-				 offset, nr_segs, ext4_get_block);
+		ret = blockdev_direct_IO(rw, iocb, inode, iter,
+				 offset, ext4_get_block);
 
 		if (unlikely((rw & WRITE) && ret < 0)) {
 			loff_t isize = i_size_read(inode);
-			loff_t end = offset + iov_length(iov, nr_segs);
+			loff_t end = offset + count;
 
 			if (end > isize)
 				ext4_truncate_failed_write(inode);
@@ -779,27 +777,18 @@ int ext4_ind_calc_metadata_amount(struct inode *inode, sector_t lblock)
 	return (blk_bits / EXT4_ADDR_PER_BLOCK_BITS(inode->i_sb)) + 1;
 }
 
-int ext4_ind_trans_blocks(struct inode *inode, int nrblocks, int chunk)
+/*
+ * Calculate number of indirect blocks touched by mapping @nrblocks logically
+ * contiguous blocks
+ */
+int ext4_ind_trans_blocks(struct inode *inode, int nrblocks)
 {
-	int indirects;
-
-	/* if nrblocks are contiguous */
-	if (chunk) {
-		/*
-		 * With N contiguous data blocks, we need at most
-		 * N/EXT4_ADDR_PER_BLOCK(inode->i_sb) + 1 indirect blocks,
-		 * 2 dindirect blocks, and 1 tindirect block
-		 */
-		return DIV_ROUND_UP(nrblocks,
-				    EXT4_ADDR_PER_BLOCK(inode->i_sb)) + 4;
-	}
 	/*
-	 * if nrblocks are not contiguous, worse case, each block touch
-	 * a indirect block, and each indirect block touch a double indirect
-	 * block, plus a triple indirect block
+	 * With N contiguous data blocks, we need at most
+	 * N/EXT4_ADDR_PER_BLOCK(inode->i_sb) + 1 indirect blocks,
+	 * 2 dindirect blocks, and 1 tindirect block
 	 */
-	indirects = nrblocks * 2 + 1;
-	return indirects;
+	return DIV_ROUND_UP(nrblocks, EXT4_ADDR_PER_BLOCK(inode->i_sb)) + 4;
 }
 
 /*
@@ -940,11 +929,13 @@ static int ext4_clear_blocks(handle_t *handle, struct inode *inode,
 			     __le32 *last)
 {
 	__le32 *p;
-	int	flags = EXT4_FREE_BLOCKS_FORGET | EXT4_FREE_BLOCKS_VALIDATED;
+	int	flags = EXT4_FREE_BLOCKS_VALIDATED;
 	int	err;
 
 	if (S_ISDIR(inode->i_mode) || S_ISLNK(inode->i_mode))
-		flags |= EXT4_FREE_BLOCKS_METADATA;
+		flags |= EXT4_FREE_BLOCKS_FORGET | EXT4_FREE_BLOCKS_METADATA;
+	else if (ext4_should_journal_data(inode))
+		flags |= EXT4_FREE_BLOCKS_FORGET;
 
 	if (!ext4_data_block_valid(EXT4_SB(inode->i_sb), block_to_free,
 				   count)) {
@@ -1325,16 +1316,24 @@ static int free_hole_blocks(handle_t *handle, struct inode *inode,
 		blk = *i_data;
 		if (level > 0) {
 			ext4_lblk_t first2;
+			ext4_lblk_t count2;
+
 			bh = sb_bread(inode->i_sb, le32_to_cpu(blk));
 			if (!bh) {
 				EXT4_ERROR_INODE_BLOCK(inode, le32_to_cpu(blk),
 						       "Read failure");
 				return -EIO;
 			}
-			first2 = (first > offset) ? first - offset : 0;
+			if (first > offset) {
+				first2 = first - offset;
+				count2 = count;
+			} else {
+				first2 = 0;
+				count2 = count - (offset - first);
+			}
 			ret = free_hole_blocks(handle, inode, bh,
 					       (__le32 *)bh->b_data, level - 1,
-					       first2, count - offset,
+					       first2, count2,
 					       inode->i_sb->s_blocksize >> 2);
 			if (ret) {
 				brelse(bh);
@@ -1344,8 +1343,8 @@ static int free_hole_blocks(handle_t *handle, struct inode *inode,
 		if (level == 0 ||
 		    (bh && all_zeroes((__le32 *)bh->b_data,
 				      (__le32 *)bh->b_data + addr_per_block))) {
-			ext4_free_data(handle, inode, parent_bh, &blk, &blk+1);
-			*i_data = 0;
+			ext4_free_data(handle, inode, parent_bh,
+				       i_data, i_data + 1);
 		}
 		brelse(bh);
 		bh = NULL;
